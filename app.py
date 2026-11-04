@@ -172,7 +172,7 @@ except Exception as e:
 st.sidebar.title("🌳 Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["Homepage & Executive Overview", "Interactive Priority Map", "District Comparison", "Model Performance & Machine Learning"]
+    ["Homepage & Executive Overview", "Interactive Priority Map", "Tree Planting Recommendations", "District Comparison", "Model Performance & Machine Learning"]
 )
 
 st.sidebar.markdown("---")
@@ -311,8 +311,100 @@ elif page == "Interactive Priority Map":
     )
 
 # ==========================================
+# PAGE 3: Tree Planting Recommendations
 # ==========================================
-# PAGE 3: District Comparison
+elif page == "Tree Planting Recommendations":
+    st.title("🌱 Tree Planting Recommendations")
+    st.markdown("Use the heat and vegetation priority score to shortlist a grid cell, then estimate a planting plan from the **actual plantable area** and site conditions.")
+    st.info("The 250 m grid identifies an area to investigate; it does not identify a verified planting site. Enter the measured plantable area below. The count is a planning estimate based on Bangkok guidance, not an AI or field-survey result.")
+
+    candidate_df = grid_df.sort_values("Priority_Score", ascending=False).head(1000).copy()
+    candidate_df["location_label"] = candidate_df.apply(
+        lambda row: f"{row['grid_id']} · {row['Priority_Category']} · score {row['Priority_Score']:.1f} · {row['latitude']:.5f}, {row['longitude']:.5f}",
+        axis=1
+    )
+    selected_label = st.selectbox("Select a priority grid cell (top 1,000 by score):", candidate_df["location_label"].tolist())
+    selected = candidate_df.loc[candidate_df["location_label"] == selected_label].iloc[0]
+
+    col_site, col_area, col_width = st.columns(3)
+    with col_site:
+        site_type = st.selectbox("Site setting:", ["Open sunny area", "Beside buildings / partial shade", "Sidewalk or median", "Waterfront"])
+    with col_area:
+        plantable_area = st.number_input("Measured plantable area (m²):", min_value=1.0, max_value=50000.0, value=100.0, step=10.0)
+    with col_width:
+        sidewalk_width = st.number_input("Sidewalk / median width (m, if relevant):", min_value=0.0, max_value=100.0, value=4.0, step=0.5)
+
+    species_catalog = {
+        "Open sunny area": [
+            ("เสลา", "Lagerstroemia loudonii", 4, 6, "แดดเต็มวัน; คู่มือ กทม. แนะนำสำหรับพื้นที่ว่าง"),
+            ("แคนา", "Dolichandrone serrulata", 4, 6, "แดดเต็มวัน; คู่มือ กทม. แนะนำสำหรับพื้นที่ว่าง"),
+            ("ปีบทอง", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "แดดเต็มวัน; คู่มือ กทม. แนะนำสำหรับพื้นที่ว่าง"),
+            ("คอร์เดีย", "ชื่อภาษาไทยตามคู่มือ กทม.", 3, 5, "แดดเต็มวัน; ระยะปลูกถี่กว่าไม้ตัวเลือกอื่นในคู่มือ")
+        ],
+        "Beside buildings / partial shade": [
+            ("พิกุล", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "พื้นที่ใกล้อาคาร; คู่มือ กทม. ระบุระยะปลูก 5–6 ม."),
+            ("ลำดวน", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "พื้นที่ใกล้อาคาร; คู่มือ กทม. ระบุระยะปลูก 5–6 ม."),
+            ("รวงผึ้ง", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "พื้นที่ใกล้อาคาร; คู่มือ กทม. ระบุระยะปลูก 4–6 ม."),
+            ("มันปู", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "พื้นที่ใกล้อาคาร; คู่มือ กทม. ระบุระยะปลูก 4–6 ม.")
+        ],
+        "Sidewalk or median": [
+            ("คอร์เดีย", "ชื่อภาษาไทยตามคู่มือ กทม.", 3, 5, "คู่มือ กทม. แนะนำสำหรับทางเท้า/เกาะกลาง; ตรวจสายไฟและความกว้างจริง"),
+            ("เสลา", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "คู่มือ กทม. แนะนำสำหรับทางเท้า/เกาะกลาง; ตรวจสายไฟและความกว้างจริง"),
+            ("ปีบทอง", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "คู่มือ กทม. แนะนำสำหรับทางเท้า/เกาะกลาง; ตรวจสายไฟและความกว้างจริง"),
+            ("พิกุล", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "คู่มือ กทม. แนะนำสำหรับทางเท้า/เกาะกลาง; ตรวจสายไฟและความกว้างจริง")
+        ],
+        "Waterfront": [
+            ("มันปู", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "คู่มือ กทม. ระบุสำหรับบริเวณริมน้ำ; ตรวจระดับน้ำท่วมและดิน"),
+            ("ลำดวน", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "คู่มือ กทม. ระบุสำหรับบริเวณริมน้ำ; ตรวจระดับน้ำท่วมและดิน"),
+            ("สังทำ", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "คู่มือ กทม. ระบุสำหรับบริเวณริมน้ำ; ตรวจระดับน้ำท่วมและดิน"),
+            ("สารภี", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "คู่มือ กทม. ระบุสำหรับบริเวณริมน้ำ; ตรวจระดับน้ำท่วมและดิน")
+        ]
+    }
+    choices = species_catalog[site_type]
+    species_label = st.selectbox("Candidate species (choose one dominant species per street/plan):", [item[0] for item in choices])
+    species = choices[[item[0] for item in choices].index(species_label)]
+    spacing_min, spacing_max = species[2], species[3]
+    if site_type == "Sidewalk or median":
+        # BMA public-space criteria specify 4–8 m spacing for sidewalks/medians.
+        spacing_min, spacing_max = 4, 8
+
+    st.markdown("### Estimate for the selected location")
+    score_col, temp_col, veg_col, pop_col = st.columns(4)
+    score_col.metric("Priority", str(selected["Priority_Category"]), f"{selected['Priority_Score']:.1f}/100")
+    temp_col.metric("Surface temperature", f"{selected['LST']:.1f} °C")
+    veg_col.metric("NDVI", f"{selected['NDVI']:.3f}")
+    pop_col.metric("Population density value", f"{selected['population']:.2f}")
+    st.caption(f"Grid {selected['grid_id']} center: {selected['latitude']:.6f}, {selected['longitude']:.6f}. This coordinate is a grid center, not a surveyed planting point.")
+
+    if site_type == "Sidewalk or median" and sidewalk_width < 3:
+        st.error("Bangkok guidance says sidewalks under 3 m wide should not receive trees. The tree estimate is set to 0 until a suitable wider planting strip is verified; consider low planting that does not obstruct pedestrian access.")
+        min_trees = max_trees = 0
+    else:
+        # Conservative area/spacing envelope; the area must be measured on site.
+        min_trees = max(0, int(np.floor(plantable_area / (spacing_max ** 2))))
+        max_trees = max(0, int(np.floor(plantable_area / (spacing_min ** 2))))
+        if max_trees == 0:
+            max_trees = 1
+        st.success(f"Estimated capacity: **{min_trees}–{max_trees} trees** of **{species[0]}** in {plantable_area:,.0f} m², using {spacing_min}–{spacing_max} m spacing.")
+
+    st.markdown(f"**Why this species:** {species[4]} The dashboard uses priority score to help rank candidate sites; it does not infer tree suitability from LST/NDVI alone.")
+    st.caption("Count formula: floor(plantable area ÷ spacing²), using the selected species' spacing range in Bangkok's Million Trees public planting manual. It assumes roughly square planting layout, so boundaries, paths, roots, utilities, setbacks, canopy overlap and access can reduce the count.")
+    if site_type == "Sidewalk or median":
+        st.warning("For Bangkok sidewalks, the cited criteria recommend tree planting only when width is at least 3 m, and 4–8 m spacing depending on species. Check overhead wires and access to homes before planting.")
+
+    plan_df = pd.DataFrame([{
+        "Grid ID": selected["grid_id"], "Latitude (grid center)": selected["latitude"], "Longitude (grid center)": selected["longitude"],
+        "Priority category": selected["Priority_Category"], "Priority score": round(float(selected["Priority_Score"]), 2),
+        "Observed LST (°C)": round(float(selected["LST"]), 2), "NDVI": round(float(selected["NDVI"]), 3),
+        "Site setting": site_type, "Species": species[0], "Species name reference": species[1],
+        "Plantable area (m²)": plantable_area, "Spacing min (m)": spacing_min, "Spacing max (m)": spacing_max,
+        "Estimated trees min": min_trees, "Estimated trees max": max_trees, "Estimate status": "Preliminary; field verification required"
+    }])
+    st.download_button("Download this preliminary planting plan (CSV)", data=plan_df.to_csv(index=False).encode("utf-8-sig"), file_name="preliminary_tree_planting_plan.csv", mime="text/csv")
+    st.markdown("**References:** [Bangkok Million Trees planting manual (species and spacing by setting)](https://greener.bangkok.go.th/wp-content/uploads/2024/06/PlantTreeManual.pdf) · [Bangkok planting criteria (sidewalk width and access)](https://budget.bangkok.go.th/main/upload/2020/04/27/A20200427093716.pdf)")
+
+# ==========================================
+# PAGE 4: District Comparison
 # ==========================================
 elif page == "District Comparison":
     st.title("📊 Bangkok District Comparisons")
