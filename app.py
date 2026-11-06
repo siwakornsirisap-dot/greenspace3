@@ -6,6 +6,8 @@ from pathlib import Path
 from html import escape
 import folium
 from folium.plugins import HeatMap
+import pydeck as pdk
+from gee_satellite import get_satellite_screening, initialize_earth_engine
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -315,94 +317,151 @@ elif page == "Interactive Priority Map":
 # ==========================================
 elif page == "Tree Planting Recommendations":
     st.title("🌱 Tree Planting Recommendations")
-    st.markdown("Use the heat and vegetation priority score to shortlist a grid cell, then estimate a planting plan from the **actual plantable area** and site conditions.")
-    st.info("The 250 m grid identifies an area to investigate; it does not identify a verified planting site. Enter the measured plantable area below. The count is a planning estimate based on Bangkok guidance, not an AI or field-survey result.")
+    st.markdown("Click a priority-map point to get an automatic, satellite-based preliminary planting screen for that grid cell.")
+    st.info("No area, site type, or species inputs are needed. The AI model estimates surface temperature and GEE screens heat, vegetation, and land cover. Tree candidates and the capacity range are then checked against Bangkok planting guidance; they are not ML predictions because the project has no verified records of species planted at each site or successful planting outcomes.")
 
-    candidate_df = grid_df.sort_values("Priority_Score", ascending=False).head(1000).copy()
-    candidate_df["location_label"] = candidate_df.apply(
-        lambda row: f"{row['grid_id']} · {row['Priority_Category']} · score {row['Priority_Score']:.1f} · {row['latitude']:.5f}, {row['longitude']:.5f}",
-        axis=1
-    )
-    selected_label = st.selectbox("Select a priority grid cell (top 1,000 by score):", candidate_df["location_label"].tolist())
-    selected = candidate_df.loc[candidate_df["location_label"] == selected_label].iloc[0]
+    map_filter_col, map_limit_col = st.columns([1, 1])
+    with map_filter_col:
+        tree_categories = st.multiselect(
+            "Filter priority categories:",
+            options=["Very High", "High", "Medium", "Low"],
+            default=["Very High", "High"],
+            key="tree_map_categories"
+        )
+    with map_limit_col:
+        tree_map_limit = st.slider("Maximum map markers:", 100, 2000, 1000, 100, key="tree_map_limit")
 
-    col_site, col_area, col_width = st.columns(3)
-    with col_site:
-        site_type = st.selectbox("Site setting:", ["Open sunny area", "Beside buildings / partial shade", "Sidewalk or median", "Waterfront"])
-    with col_area:
-        plantable_area = st.number_input("Measured plantable area (m²):", min_value=1.0, max_value=50000.0, value=100.0, step=10.0)
-    with col_width:
-        sidewalk_width = st.number_input("Sidewalk / median width (m, if relevant):", min_value=0.0, max_value=100.0, value=4.0, step=0.5)
-
-    species_catalog = {
-        "Open sunny area": [
-            ("เสลา", "Lagerstroemia loudonii", 4, 6, "แดดเต็มวัน; คู่มือ กทม. แนะนำสำหรับพื้นที่ว่าง"),
-            ("แคนา", "Dolichandrone serrulata", 4, 6, "แดดเต็มวัน; คู่มือ กทม. แนะนำสำหรับพื้นที่ว่าง"),
-            ("ปีบทอง", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "แดดเต็มวัน; คู่มือ กทม. แนะนำสำหรับพื้นที่ว่าง"),
-            ("คอร์เดีย", "ชื่อภาษาไทยตามคู่มือ กทม.", 3, 5, "แดดเต็มวัน; ระยะปลูกถี่กว่าไม้ตัวเลือกอื่นในคู่มือ")
-        ],
-        "Beside buildings / partial shade": [
-            ("พิกุล", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "พื้นที่ใกล้อาคาร; คู่มือ กทม. ระบุระยะปลูก 5–6 ม."),
-            ("ลำดวน", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "พื้นที่ใกล้อาคาร; คู่มือ กทม. ระบุระยะปลูก 5–6 ม."),
-            ("รวงผึ้ง", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "พื้นที่ใกล้อาคาร; คู่มือ กทม. ระบุระยะปลูก 4–6 ม."),
-            ("มันปู", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "พื้นที่ใกล้อาคาร; คู่มือ กทม. ระบุระยะปลูก 4–6 ม.")
-        ],
-        "Sidewalk or median": [
-            ("คอร์เดีย", "ชื่อภาษาไทยตามคู่มือ กทม.", 3, 5, "คู่มือ กทม. แนะนำสำหรับทางเท้า/เกาะกลาง; ตรวจสายไฟและความกว้างจริง"),
-            ("เสลา", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "คู่มือ กทม. แนะนำสำหรับทางเท้า/เกาะกลาง; ตรวจสายไฟและความกว้างจริง"),
-            ("ปีบทอง", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "คู่มือ กทม. แนะนำสำหรับทางเท้า/เกาะกลาง; ตรวจสายไฟและความกว้างจริง"),
-            ("พิกุล", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "คู่มือ กทม. แนะนำสำหรับทางเท้า/เกาะกลาง; ตรวจสายไฟและความกว้างจริง")
-        ],
-        "Waterfront": [
-            ("มันปู", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "คู่มือ กทม. ระบุสำหรับบริเวณริมน้ำ; ตรวจระดับน้ำท่วมและดิน"),
-            ("ลำดวน", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "คู่มือ กทม. ระบุสำหรับบริเวณริมน้ำ; ตรวจระดับน้ำท่วมและดิน"),
-            ("สังทำ", "ชื่อภาษาไทยตามคู่มือ กทม.", 5, 6, "คู่มือ กทม. ระบุสำหรับบริเวณริมน้ำ; ตรวจระดับน้ำท่วมและดิน"),
-            ("สารภี", "ชื่อภาษาไทยตามคู่มือ กทม.", 4, 6, "คู่มือ กทม. ระบุสำหรับบริเวณริมน้ำ; ตรวจระดับน้ำท่วมและดิน")
-        ]
+    matching_cells = grid_df[grid_df["Priority_Category"].isin(tree_categories)].copy()
+    tree_map_df = (
+        matching_cells.sample(n=min(tree_map_limit, len(matching_cells)), random_state=42)
+        if not matching_cells.empty else matching_cells
+    ).reset_index(drop=True)
+    tree_color_map = {
+        "Very High": [230, 57, 70, 220], "High": [244, 162, 97, 220],
+        "Medium": [255, 209, 102, 220], "Low": [82, 183, 136, 220]
     }
-    choices = species_catalog[site_type]
-    species_label = st.selectbox("Candidate species (choose one dominant species per street/plan):", [item[0] for item in choices])
-    species = choices[[item[0] for item in choices].index(species_label)]
-    spacing_min, spacing_max = species[2], species[3]
-    if site_type == "Sidewalk or median":
-        # BMA public-space criteria specify 4–8 m spacing for sidewalks/medians.
-        spacing_min, spacing_max = 4, 8
+    tree_map_df["marker_color"] = tree_map_df["Priority_Category"].map(tree_color_map)
+    st.caption(f"Click a marker to inspect that grid cell. Showing {len(tree_map_df):,} markers from {len(matching_cells):,} matching cells.")
 
-    st.markdown("### Estimate for the selected location")
+    if tree_map_df.empty:
+        st.warning("No grid cells match the selected priority categories.")
+        st.stop()
+
+    tree_layer = pdk.Layer(
+        "ScatterplotLayer", data=tree_map_df, id="priority-cells",
+        get_position="[longitude, latitude]", get_radius=130,
+        get_fill_color="marker_color", get_line_color=[50, 50, 50, 220],
+        line_width_min_pixels=1, stroked=True, filled=True,
+        pickable=True, auto_highlight=True, radius_min_pixels=4
+    )
+    tree_deck = pdk.Deck(
+        layers=[tree_layer],
+        initial_view_state=pdk.ViewState(latitude=13.7563, longitude=100.5018, zoom=10, pitch=0),
+        tooltip={"text": "Grid {grid_id}\nPriority: {Priority_Category} ({Priority_Score} / 100)\nLST: {LST} °C\nNDVI: {NDVI}\nPopulation: {population}"},
+        map_style="light"
+    )
+    tree_map_event = st.pydeck_chart(
+        tree_deck, key="tree_priority_map", on_select="rerun",
+        selection_mode="single-object", height=580,
+        alt="Clickable Bangkok priority map for selecting a grid cell to inspect for tree planting"
+    )
+    selected_objects = tree_map_event.selection.objects.get("priority-cells", [])
+    selected_grid_id = selected_objects[0].get("grid_id") if selected_objects else None
+    selected_on_current_map = (
+        tree_map_df[tree_map_df["grid_id"].astype(str) == str(selected_grid_id)]
+        if selected_grid_id is not None else tree_map_df.iloc[0:0]
+    )
+    if not selected_on_current_map.empty:
+        selected_matches = grid_df[grid_df["grid_id"].astype(str) == str(selected_grid_id)]
+        selected = selected_matches.iloc[0] if not selected_matches.empty else tree_map_df.iloc[0]
+    else:
+        selected = tree_map_df.sort_values("Priority_Score", ascending=False).iloc[0]
+        st.caption("No marker selected yet; showing the highest-priority visible cell as an example. Click another marker to update it.")
+
+    st.markdown("### 🛰️ Satellite screening (Google Earth Engine)")
+    gee_ready, gee_message = initialize_earth_engine()
+    satellite = None
+    if gee_ready:
+        try:
+            with st.spinner("กำลังคำนวณค่าภาพดาวเทียมรอบจุดที่เลือกจาก Earth Engine..."):
+                satellite = get_satellite_screening(float(selected["latitude"]), float(selected["longitude"]))
+            sat_lst, sat_ndvi = st.columns(2)
+            if satellite["lst_c"] is not None:
+                sat_lst.metric("Landsat median surface temperature (last 3 years)", f"{satellite['lst_c']:.1f} °C")
+            else:
+                sat_lst.metric("Landsat surface temperature", "No clear pixels")
+            if satellite["ndvi"] is not None:
+                sat_ndvi.metric("Sentinel-2 hot-season NDVI", f"{satellite['ndvi']:.3f}")
+            else:
+                sat_ndvi.metric("Sentinel-2 NDVI", "No clear pixels")
+            st.caption(f"Matched hot seasons: {satellite['hot_season_start']} to {satellite['hot_season_end']} (March–May each year) · Landsat scenes: {satellite['landsat_scenes']} · Sentinel-2 scenes: {satellite['sentinel_scenes']}. Landsat thermal pixels are coarse; the 250 m grid is a screening zone, not a surveyed plot.")
+        except Exception as exc:
+            st.warning(f"ดึงข้อมูลภาพดาวเทียมจาก Earth Engine ไม่สำเร็จ: {exc}")
+    else:
+        st.warning(f"ยังไม่ได้เชื่อมต่อ Earth Engine: {gee_message}. ตั้งค่า secrets ตาม README เพื่อเปิดใช้การดึงค่าภาพดาวเทียมอัตโนมัติ")
+
+    st.markdown("### 🌳 Automatic planting screen")
+    st.caption("Select a map point; GEE compares three completed hot seasons for heat/vegetation and screens recent 10 m land cover. Cloud/shadow and low-confidence pixels are excluded. The 250 m grid remains a screening zone, not a planting parcel.")
+
     score_col, temp_col, veg_col, pop_col = st.columns(4)
     score_col.metric("Priority", str(selected["Priority_Category"]), f"{selected['Priority_Score']:.1f}/100")
-    temp_col.metric("Surface temperature", f"{selected['LST']:.1f} °C")
-    veg_col.metric("NDVI", f"{selected['NDVI']:.3f}")
+    temp_col.metric("Grid source LST", f"{selected['LST']:.1f} °C")
+    veg_col.metric("Grid source NDVI", f"{selected['NDVI']:.3f}")
     pop_col.metric("Population density value", f"{selected['population']:.2f}")
-    st.caption(f"Grid {selected['grid_id']} center: {selected['latitude']:.6f}, {selected['longitude']:.6f}. This coordinate is a grid center, not a surveyed planting point.")
+    if pd.notna(selected.get("LST_Predicted")):
+        st.caption(f"Random Forest AI estimate for this grid: {selected['LST_Predicted']:.1f} °C surface temperature. This estimates heat exposure; it does not predict a tree species or planting count.")
+    st.caption(f"Grid {selected['grid_id']} center: {selected['latitude']:.6f}, {selected['longitude']:.6f}. Satellite summary covers an approximately 250 m cell, not a surveyed planting plot.")
 
-    if site_type == "Sidewalk or median" and sidewalk_width < 3:
-        st.error("Bangkok guidance says sidewalks under 3 m wide should not receive trees. The tree estimate is set to 0 until a suitable wider planting strip is verified; consider low planting that does not obstruct pedestrian access.")
-        min_trees = max_trees = 0
+    min_trees = max_trees = None
+    species_recommendation = "Unavailable"
+    open_area_m2 = None
+    landcover_area = satellite.get("landcover_area_m2", {}) if satellite is not None else {}
+    if landcover_area:
+        open_area_m2 = float(landcover_area.get("grass", 0) + landcover_area.get("bare", 0))
+        tree_cover_m2 = float(landcover_area.get("trees", 0))
+        water_m2 = float(landcover_area.get("water", 0) + landcover_area.get("flooded_vegetation", 0))
+        land_col, cover_col, water_col = st.columns(3)
+        land_col.metric("Confident open-land proxy", f"{open_area_m2:,.0f} m²", "grass + bare; confidence ≥ 0.60")
+        cover_col.metric("Existing tree-cover class", f"{tree_cover_m2:,.0f} m²")
+        water_col.metric("Water / flooded class", f"{water_m2:,.0f} m²")
+
+        confident_coverage = satellite.get("landcover_confident_coverage_pct")
+        if confident_coverage is None or confident_coverage < 50:
+            st.warning(f"พื้นที่กริดที่ Dynamic World จำแนกได้ด้วยความมั่นใจ ≥ 0.60 มีเพียง {confident_coverage:.1f}% ของกริด จึงยังไม่คำนวณจำนวนต้นจากพื้นที่ที่ข้อมูลครอบคลุมไม่พอ" if confident_coverage is not None else "ยังคำนวณสัดส่วนพื้นที่ที่จำแนกได้มั่นใจไม่ได้ จึงยังไม่ประมาณจำนวนต้น")
+        elif open_area_m2 >= 36:
+            # The Bangkok planting manual lists 4–6 m spacing for these species.
+            min_trees = int(np.floor(open_area_m2 / (6 ** 2)))
+            max_trees = int(np.floor(open_area_m2 / (4 ** 2)))
+            species_recommendation = "เสลา, แคนา, ปีบทอง (ตัวเลือกสำหรับพื้นที่รับแดดเต็มวัน)"
+            st.success(f"**ข้อเสนอเบื้องต้น:** พื้นที่เปิดที่ดาวเทียมจำแนกได้อาจรองรับประมาณ **{min_trees:,}–{max_trees:,} ต้น** ที่ระยะปลูก 4–6 ม. หากพื้นที่ดังกล่าวเป็นพื้นที่ปลูกจริงและได้รับอนุญาต")
+            st.markdown("**ชนิดไม้ที่เข้ากับเงื่อนไขพื้นที่เปิดรับแดด:** เสลา, แคนา และปีบทอง เป็นตัวเลือกที่ กทม. ระบุสำหรับพื้นที่แดดเต็มวัน ภาพดาวเทียมยังยืนยันร่มเงารายจุด ดิน สายไฟ ท่อใต้ดิน หรือกรรมสิทธิ์ไม่ได้ จึงไม่จัดอันดับว่า species ใดดีที่สุด")
+        else:
+            st.warning("GEE ไม่พบพื้นที่ grass/bare มากพอสำหรับคำนวณความจุปลูกแบบ 4–6 ม. ในเซลล์นี้ จึงยังไม่แนะนำจำนวนต้น หากเป็นทางเท้าหรือเกาะกลาง ระบบภาพ 10 ม. ระบุความกว้างและแนวปลูกไม่ได้")
+
+        confidence = satellite.get("landcover_confidence")
+        confidence_text = f"{confidence:.2f}" if confidence is not None else "ไม่พร้อมใช้งาน"
+        coverage_text = f"{confident_coverage:.1f}%" if confident_coverage is not None else "ไม่พร้อมใช้งาน"
+        st.caption(f"Dynamic World {satellite.get('landcover_start')} to {satellite.get('landcover_end')} · scenes: {satellite.get('landcover_scenes', 0)} · median top-class confidence: {confidence_text} · grid area retained after confidence filter: {coverage_text}. Class areas count only pixels with top-class confidence ≥ 0.60. Grass/bare is a land-cover proxy, not verified plantable land. Produced for Dynamic World by Google with National Geographic Society and World Resources Institute.")
+        st.warning("**อ่านเป็นค่าคัดกรอง ไม่ใช่จำนวนที่อนุมัติปลูกได้:** land cover ไม่บอกเขตที่ดินสาธารณะ ทางเดิน สายไฟ ท่อ การเว้นระยะอาคาร หรือจุดปลูกจริง พื้นที่และจำนวนจริงอาจน้อยกว่าค่านี้มาก ต้องตรวจหน้างานก่อนวางแผนปลูก")
+    elif satellite is not None:
+        st.warning("GEE ดึงอุณหภูมิ/NDVI ได้ แต่ยังไม่มีภาพ land-cover สำหรับจุดนี้ จึงไม่สร้างจำนวนต้นหรือชนิดไม้โดยเดา")
     else:
-        # Conservative area/spacing envelope; the area must be measured on site.
-        min_trees = max(0, int(np.floor(plantable_area / (spacing_max ** 2))))
-        max_trees = max(0, int(np.floor(plantable_area / (spacing_min ** 2))))
-        if max_trees == 0:
-            max_trees = 1
-        st.success(f"Estimated capacity: **{min_trees}–{max_trees} trees** of **{species[0]}** in {plantable_area:,.0f} m², using {spacing_min}–{spacing_max} m spacing.")
-
-    st.markdown(f"**Why this species:** {species[4]} The dashboard uses priority score to help rank candidate sites; it does not infer tree suitability from LST/NDVI alone.")
-    st.caption("Count formula: floor(plantable area ÷ spacing²), using the selected species' spacing range in Bangkok's Million Trees public planting manual. It assumes roughly square planting layout, so boundaries, paths, roots, utilities, setbacks, canopy overlap and access can reduce the count.")
-    if site_type == "Sidewalk or median":
-        st.warning("For Bangkok sidewalks, the cited criteria recommend tree planting only when width is at least 3 m, and 4–8 m spacing depending on species. Check overhead wires and access to homes before planting.")
+        st.warning("ยังไม่ได้ผลวิเคราะห์จาก GEE สำหรับจุดนี้ จึงยังไม่แนะนำจำนวนหรือชนิดต้นไม้ ตรวจการเชื่อมต่อ Earth Engine แล้วลองเปิดหน้านี้อีกครั้ง")
 
     plan_df = pd.DataFrame([{
         "Grid ID": selected["grid_id"], "Latitude (grid center)": selected["latitude"], "Longitude (grid center)": selected["longitude"],
         "Priority category": selected["Priority_Category"], "Priority score": round(float(selected["Priority_Score"]), 2),
-        "Observed LST (°C)": round(float(selected["LST"]), 2), "NDVI": round(float(selected["NDVI"]), 3),
-        "Site setting": site_type, "Species": species[0], "Species name reference": species[1],
-        "Plantable area (m²)": plantable_area, "Spacing min (m)": spacing_min, "Spacing max (m)": spacing_max,
-        "Estimated trees min": min_trees, "Estimated trees max": max_trees, "Estimate status": "Preliminary; field verification required"
+        "LST (°C)": round(float(satellite["lst_c"]), 2) if satellite is not None and satellite.get("lst_c") is not None else None,
+        "Sentinel-2 NDVI": round(float(satellite["ndvi"]), 3) if satellite is not None and satellite.get("ndvi") is not None else None,
+        "Potential open surface (m²)": round(open_area_m2, 1) if open_area_m2 is not None else None,
+        "Confident land-cover coverage (%)": round(float(satellite["landcover_confident_coverage_pct"]), 1) if satellite is not None and satellite.get("landcover_confident_coverage_pct") is not None else None,
+        "Dynamic World median top-class confidence": round(float(satellite["landcover_confidence"]), 3) if satellite is not None and satellite.get("landcover_confidence") is not None else None,
+        "Automatic species shortlist": species_recommendation,
+        "Estimated capacity min": min_trees, "Estimated capacity max": max_trees,
+        "Estimate status": "Satellite screening only; verify ownership and planting constraints in field"
     }])
     st.download_button("Download this preliminary planting plan (CSV)", data=plan_df.to_csv(index=False).encode("utf-8-sig"), file_name="preliminary_tree_planting_plan.csv", mime="text/csv")
-    st.markdown("**References:** [Bangkok Million Trees planting manual (species and spacing by setting)](https://greener.bangkok.go.th/wp-content/uploads/2024/06/PlantTreeManual.pdf) · [Bangkok planting criteria (sidewalk width and access)](https://budget.bangkok.go.th/main/upload/2020/04/27/A20200427093716.pdf)")
-
+    st.markdown("**References:** [Bangkok Million Trees planting manual (species and spacing)](https://greener.bangkok.go.th/wp-content/uploads/2024/06/PlantTreeManual.pdf) · [Bangkok species by site and sunlight](https://greener.bangkok.go.th/green-space/million-trees/) · [Dynamic World 10 m land cover](https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_DYNAMICWORLD_V1)")
 # ==========================================
 # PAGE 4: District Comparison
 # ==========================================
@@ -424,6 +483,20 @@ elif page == "Model Performance & Machine Learning":
     st.title("🤖 Machine Learning Model Performance")
     st.markdown("##### *Random Forest Regression for Land Surface Temperature Estimation*")
     st.markdown("---")
+
+    st.subheader("7-step Machine Learning workflow used in this project")
+    ml_steps = [
+        ("1. Define the problem", "Estimate land surface temperature (LST) for each 250 m grid cell; LST is the target label."),
+        ("2. Collect data", "Load the prepared Bangkok grid CSV containing LST, NDVI, population, and cell coordinates."),
+        ("3. Clean the data", "Remove rows missing required fields and filter implausible LST, NDVI, and population values."),
+        ("4. Prepare model features", "Use longitude, latitude, NDVI, and population as inputs; use observed LST as the target."),
+        ("5. Split the data", f"Hold out 20% for evaluation and train on 80% (seed 42; {ml_metrics['train_samples']:,} training and {ml_metrics['test_samples']:,} test rows)."),
+        ("6. Train the AI model", "Fit a Random Forest regressor with 100 trees and maximum depth 12, then generate grid-level LST estimates."),
+        ("7. Evaluate and use predictions", "Compare held-out predictions with observed LST using MAE, RMSE, and R²; use estimates as heat-screening information."),
+    ]
+    for title, description in ml_steps:
+        st.markdown(f"**{title}** — {description}")
+    st.warning("This trained model predicts LST only. Tree species and tree counts are not trained ML targets: the current data has no verified site-level species, planting count, or survival labels. The planting screen combines GEE land-cover evidence with published Bangkok guidance, so it should not be presented as an AI species prediction.")
     
     col_m1, col_m2, col_m3 = st.columns(3)
     with col_m1:
